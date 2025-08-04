@@ -1,0 +1,134 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:converters="clr-namespace:Q9CS_CrossPlatform.Converters"
+        x:Class="Q9CS_CrossPlatform.MainWindow"
+        x:Name="RootWindow"
+        Title="九方輸入法 (跨平台)"
+        Width="280" Height="350"
+        MinWidth="250" MinHeight="320"
+        Topmost="True"
+        CanResize="True"
+        WindowStartupLocation="Manual">
+    
+    <Window.Resources>
+        <converters:WidthToFontSizeConverter x:Key="WidthToFontSizeConverter"/>
+    </Window.Resources>
+    
+    <Window.Styles>
+        <!-- Candidate Button Style -->
+        <Style Selector="Button.candidate">
+            <!--Setter Property="FontFamily" Value="Noto Sans CJK SC, Microsoft YaHei, SimHei, Segoe UI"/-->
+            <Setter Property="Background" Value="#FFFFFF"/>
+            <Setter Property="Foreground" Value="#000000"/>
+            <Setter Property="HorizontalContentAlignment" Value="Center"/>
+            <Setter Property="VerticalContentAlignment" Value="Center"/>
+            <Setter Property="BorderBrush" Value="#CCCCCC"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="CornerRadius" Value="4"/>
+            <Setter Property="Margin" Value="2"/>
+            <Setter Property="Padding" Value="0"/>
+            <Setter Property="HorizontalAlignment" Value="Stretch"/>
+            <Setter Property="VerticalAlignment" Value="Stretch"/>
+            <Setter Property="FontSize" Value="{Binding Bounds.Width, ElementName=RootWindow, Converter={StaticResource WidthToFontSizeConverter}}"/> <!-- Updated to RootWindow -->
+        </Style>
+        
+        <!-- Style for StackPanel inside buttons -->
+        <Style Selector="Button.candidate StackPanel">
+            <Setter Property="HorizontalAlignment" Value="Center"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+            <Setter Property="Spacing" Value="2"/>
+        </Style>
+        
+        <!-- Style for TextBlock inside buttons -->
+        <Style Selector="Button.candidate TextBlock">
+            <Setter Property="HorizontalAlignment" Value="Center"/>
+            <Setter Property="TextAlignment" Value="Center"/>
+            <Setter Property="FontSize" Value="14"/>
+        </Style>
+        
+        <!-- Style for Image inside buttons -->
+        <Style Selector="Button.candidate Image">
+            <Setter Property="HorizontalAlignment" Value="Center"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+        </Style>
+        
+        <Style Selector="Button.candidate:pointerover">
+            <Setter Property="Background" Value="#F0F0F0"/>
+        </Style>
+        
+        <Style Selector="Button.candidate:pressed">
+            <Setter Property="Background" Value="#E0E0E0"/>
+        </Style>
+        
+        <!-- Control Button Style -->
+        <Style Selector="Button.control">
+            <Setter Property="FontSize" Value="16"/>
+            <Setter Property="Width" Value="80"/>
+            <Setter Property="Height" Value="35"/>
+            <Setter Property="Background" Value="#F8F8F8"/>
+            <Setter Property="Foreground" Value="#333333"/>
+            <Setter Property="HorizontalContentAlignment" Value="Center"/>
+            <Setter Property="VerticalContentAlignment" Value="Center"/>
+            <Setter Property="BorderBrush" Value="#AAAAAA"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="CornerRadius" Value="4"/>
+        </Style>
+        
+        <Style Selector="Button.control:pointerover">
+            <Setter Property="Background" Value="#E8E8E8"/>
+        </Style>
+    </Window.Styles>
+
+    <Grid Margin="1">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>        
+
+        <Grid x:Name="CandidateGrid" 
+              Grid.Row="1"
+              RowDefinitions="*,*,*" 
+              ColumnDefinitions="*,*,*" 
+              HorizontalAlignment="Stretch"
+              VerticalAlignment="Stretch"
+              Margin="0,0,0,10">
+            
+            <!-- Row 0 (Top row - positions 7,8,9) -->
+            <Button x:Name="Cell1" Grid.Row="0" Grid.Column="0" Classes="candidate"/>
+            <Button x:Name="Cell2" Grid.Row="0" Grid.Column="1" Classes="candidate"/>
+            <Button x:Name="Cell3" Grid.Row="0" Grid.Column="2" Classes="candidate"/>
+            
+            <!-- Row 1 (Middle row - positions 4,5,6) -->
+            <Button x:Name="Cell4" Grid.Row="1" Grid.Column="0" Classes="candidate"/>
+            <Button x:Name="Cell5" Grid.Row="1" Grid.Column="1" Classes="candidate"/>
+            <Button x:Name="Cell6" Grid.Row="1" Grid.Column="2" Classes="candidate"/>
+            
+            <!-- Row 2 (Bottom row - positions 1,2,3) -->
+            <Button x:Name="Cell7" Grid.Row="2" Grid.Column="0" Classes="candidate"/>
+            <Button x:Name="Cell8" Grid.Row="2" Grid.Column="1" Classes="candidate"/>
+            <Button x:Name="Cell9" Grid.Row="2" Grid.Column="2" Classes="candidate"/>
+        </Grid>
+        
+        <!-- Control Buttons -->
+        <StackPanel Grid.Row="2" 
+                    Orientation="Horizontal" 
+                    HorizontalAlignment="Center" 
+                    Spacing="20"
+                    Margin="0,0,0,5">
+            <Button x:Name="Cell0" Content="下頁" Classes="control"/>
+            <Button x:Name="Cell10" Content="取消" Classes="control"/>
+        </StackPanel>
+        
+        <!-- Status Text -->
+        <TextBlock x:Name="StatusBlock" 
+                   Grid.Row="3"
+                   Text="請輸入 3 位數字"                    
+                   FontSize="14" 
+                   HorizontalAlignment="Center"
+                   TextAlignment="Center"
+                   Foreground="#666666"/>        
+    </Grid>
+</Window>
