@@ -9,3 +9,8 @@
 要行python同裝一堆野，暫時未整install.sh
 
 總之用到，用住先
+
+## Credit to
+Hocti: [Q9CS](https://github.com/Hocti/Q9CS)
+
+files通用
