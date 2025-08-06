@@ -24,6 +24,7 @@ using System.Text.Json;
 
 namespace Q9CS_CrossPlatform
 {
+    
     public class WindowSizeConfig
     {
         public double Width { get; set; }
@@ -44,7 +45,7 @@ namespace Q9CS_CrossPlatform
     }
 
     public partial class MainWindow : Window
-    {
+    {        
         private readonly string _configPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "config.json");
         private const double AspectRatio = 280.0 / 350.0; // 4:5 ratio
         private bool _isProgrammaticResize = false; // Flag to prevent recursive resizing
@@ -73,8 +74,9 @@ namespace Q9CS_CrossPlatform
         private bool _f10WasPressed = false;
 
         // Global keyboard hook
-        private GlobalKeyboardHook _globalHook;
+        private IKeyboardHook _globalHook;
         private bool _globalInputEnabled = true; // Toggle for global input capture
+        private Process _linuxHookProcess;
 
         // Font detection
         private string _preferredFontFamily = "Microsoft YaHei";
@@ -128,12 +130,29 @@ namespace Q9CS_CrossPlatform
             this.Width = 280;
             this.Height = 350;
             var screen = this.Screens.Primary.WorkingArea;
+            
+            // Position in top-right corner by default for better visibility
             this.Position = new PixelPoint(
-                screen.Width - (int)this.Width,
-                (screen.Height - (int)this.Height) / 2);
+                screen.Width - (int)this.Width - 20,  // 20px margin from edge
+                20); // 20px from top
+                
             this.WindowState = WindowState.Normal;
-            this.Topmost = true; // Ensure window remains topmost
-            Log.Information($"Set default window size and position: Width=280, Height=350, X={this.Position.X}, Y={this.Position.Y}, Topmost={this.Topmost}");
+            this.Topmost = true;
+            this.ShowInTaskbar = true;
+            
+            //Log.Information($"Set default window position: X={this.Position.X}, Y={this.Position.Y}");
+        }
+        private void ToggleGlobalInputMode()
+        {
+            _globalInputEnabled = !_globalInputEnabled;
+            
+            string status = _globalInputEnabled ? "已啟用" : "已停用";
+            //Log.Information($"Global input mode {status}");
+            
+            UpdateStatusDisplay();
+            
+            // Show notification in window
+            _statusBlock.Text = $"全域輸入模式 {status}";
         }
         private void SaveWindowSize()
         {
@@ -217,15 +236,25 @@ namespace Q9CS_CrossPlatform
         }
         private void OnClosing(object? sender, System.ComponentModel.CancelEventArgs e)
         {
-            SaveWindowSize(); // Save size before closing
-            StopGlobalHotkeyMonitoring();
+            SaveWindowSize();
 
-            // Cleanup global keyboard hook
+            // Stop Windows-specific stuff
+            StopGlobalHotkeyMonitoring();
             if (_globalHook != null)
             {
                 _globalHook.Uninstall();
                 _globalHook.KeyDown -= OnGlobalKeyDown;
                 _globalHook = null;
+            }
+
+            // Add this part to kill the Linux process
+            if (_linuxHookProcess != null && !_linuxHookProcess.HasExited)
+            {
+                //Log.Information("Stopping Linux keyboard hook process...");
+                // Killing the 'sudo' process should also terminate the child python script.
+                _linuxHookProcess.Kill(true); 
+                _linuxHookProcess = null;
+                //Log.Information("Linux hook process stopped.");
             }
 
             // Dispose of images
@@ -351,115 +380,442 @@ namespace Q9CS_CrossPlatform
                 }
             }
         }
-
         private bool OnGlobalKeyDown(int vkCode, bool isKeyUp)
         {
             try
             {
-                // Don't process if hidden or global input disabled
-                if (_isHidden || !_globalInputEnabled)
-                    return false; // Let the key pass through
+                //Log.Information($"=== GLOBAL KEY EVENT === VK:{vkCode:X2} ({vkCode}) isKeyUp:{isKeyUp}");
+                //Log.Information($"Window state - IsActive:{this.IsActive} IsVisible:{this.IsVisible} IsHidden:{_isHidden}");
+                //Log.Information($"Global input enabled: {_globalInputEnabled}");
+                //Log.Information($"Use numpad: {_useNumpad}");
+                //Log.Information($"Select mode: {_selectMode}");
+                //Log.Information($"Current code: '{_currCode}'");
 
-                // Convert VK code to our key handling
+                // Don't process key up events for Chinese input to avoid double-triggering
+                if (isKeyUp)
+                {
+                    //Log.Information("Ignoring key up event");
+                    return false;
+                }
+
+                // Always handle F10 for visibility toggle (works globally)
+                if (vkCode == 0x79) // F10
+                {
+                    //Log.Information("F10 pressed - toggling visibility");
+                    Avalonia.Threading.Dispatcher.UIThread.Post(() => ToggleVisibility());
+                    return true; // Always block F10
+                }
+
+                // Don't process Chinese input when global input is disabled
+                if (!_globalInputEnabled)
+                {
+                    //Log.Information("Global input disabled - not processing key");
+                    return false;
+                }
+
                 bool shouldBlock = false;
 
                 if (_useNumpad)
                 {
-                    // Handle ONLY numpad keys (0x60-0x69) - NOT regular numbers (0x30-0x39)
+                    //Log.Information("Processing in numpad mode");
+                    
+                    // Handle ONLY dedicated numpad keys for Chinese input - GLOBALLY
                     if (vkCode >= 0x60 && vkCode <= 0x69) // NumPad 0-9 ONLY
                     {
                         int num = vkCode - 0x60;
-                        Avalonia.Threading.Dispatcher.UIThread.Post(() => PressKey(num));
-                        shouldBlock = true;
-                    }
-                    else if (vkCode == 0x6E) // Numpad Decimal point ONLY
-                    {
-                        Avalonia.Threading.Dispatcher.UIThread.Post(() => CommandInput(q9command.cancel));
-                        shouldBlock = true;
-                    }
-                    else if (vkCode == 0x6B) // Numpad Add (+)
-                    {
-                        Avalonia.Threading.Dispatcher.UIThread.Post(() => CommandInput(q9command.relate));
-                        shouldBlock = true;
-                    }
-                    else if (vkCode == 0x6D) // Numpad Subtract (-)
-                    {
-                        Avalonia.Threading.Dispatcher.UIThread.Post(() =>
-                        {
-                            if (_selectMode)
-                                CommandInput(q9command.prev);
-                            else
-                                CommandInput(q9command.shortcut);
+                        //Log.Information($"*** NUMPAD {num} DETECTED *** - Processing Chinese input");
+                        //Log.Information($"Dispatching to UI thread...");
+                        
+                        Avalonia.Threading.Dispatcher.UIThread.Post(() => {
+                            //Log.Information($"UI Thread: Processing numpad {num}");
+                            //Log.Information($"Window focused: {this.IsActive}");
+                            PressKeyGlobal(num);
+                            //Log.Information($"PressKeyGlobal({num}) completed");
                         });
                         shouldBlock = true;
+                        //Log.Information($"*** BLOCKING NUMPAD {num} ***");
                     }
-                    else if (vkCode == 0x6A) // Numpad Multiply (*)
+                    else if (vkCode == 0x6E) // Numpad Decimal point (.) - Cancel function
                     {
-                        Avalonia.Threading.Dispatcher.UIThread.Post(() => CommandInput(q9command.homo));
+                        //Log.Information("*** NUMPAD DECIMAL DETECTED *** - Cancel function");
+                        Avalonia.Threading.Dispatcher.UIThread.Post(() => {
+                            //Log.Information("UI Thread: Processing cancel");
+                            CommandInputGlobal(q9command.cancel);
+                            //Log.Information("CommandInputGlobal(cancel) completed");
+                        });
                         shouldBlock = true;
+                        //Log.Information("*** BLOCKING NUMPAD DECIMAL ***");
                     }
-                    else if (vkCode == 0x6F) // Numpad Divide (/)
+                    else if (vkCode == 0x6B) // Numpad Add (+) - Relate function
                     {
-                        Avalonia.Threading.Dispatcher.UIThread.Post(() => CommandInput(q9command.openclose));
+                        //Log.Information("*** NUMPAD ADD DETECTED *** - Relate function");
+                        Avalonia.Threading.Dispatcher.UIThread.Post(() => {
+                            //Log.Information("UI Thread: Processing relate");
+                            CommandInputGlobal(q9command.relate);
+                            //Log.Information("CommandInputGlobal(relate) completed");
+                        });
                         shouldBlock = true;
+                        //Log.Information("*** BLOCKING NUMPAD ADD ***");
+                    }
+                    else if (vkCode == 0x6D) // Numpad Subtract (-) - Prev/Shortcut function
+                    {
+                        //Log.Information("*** NUMPAD SUBTRACT DETECTED *** - Prev/Shortcut function");
+                        Avalonia.Threading.Dispatcher.UIThread.Post(() => {
+                            //Log.Information("UI Thread: Processing subtract");
+                            if (_selectMode)
+                            {
+                                //Log.Information("Select mode - calling prev");
+                                CommandInputGlobal(q9command.prev);
+                            }
+                            else
+                            {
+                                //Log.Information("Not select mode - calling shortcut");
+                                CommandInputGlobal(q9command.shortcut);
+                            }
+                            //Log.Information("CommandInputGlobal(subtract) completed");
+                        });
+                        shouldBlock = true;
+                        //Log.Information("*** BLOCKING NUMPAD SUBTRACT ***");
+                    }
+                    else if (vkCode == 0x6A) // Numpad Multiply (*) - Homo function
+                    {
+                        //Log.Information("*** NUMPAD MULTIPLY DETECTED *** - Homo function");
+                        Avalonia.Threading.Dispatcher.UIThread.Post(() => {
+                            //Log.Information("UI Thread: Processing multiply");
+                            CommandInputGlobal(q9command.homo);
+                            //Log.Information("CommandInputGlobal(homo) completed");
+                        });
+                        shouldBlock = true;
+                        //Log.Information("*** BLOCKING NUMPAD MULTIPLY ***");
+                    }
+                    else if (vkCode == 0x6F) // Numpad Divide (/) - OpenClose function
+                    {
+                        //Log.Information("*** NUMPAD DIVIDE DETECTED *** - OpenClose function");
+                        Avalonia.Threading.Dispatcher.UIThread.Post(() => {
+                            //Log.Information("UI Thread: Processing divide");
+                            CommandInputGlobal(q9command.openclose);
+                            //Log.Information("CommandInputGlobal(openclose) completed");
+                        });
+                        shouldBlock = true;
+                        //Log.Information("*** BLOCKING NUMPAD DIVIDE ***");
+                    }
+                    else
+                    {
+                        //Log.Information($"Key VK:{vkCode:X2} not a recognized numpad key - allowing passthrough");
                     }
                 }
                 else
                 {
-                    // Handle alternative letter keys (unchanged)
+                    //Log.Information("Processing in alternative letter mode");
+                    // Handle alternative letter keys when numpad mode is disabled
                     char keyChar = VkCodeToChar(vkCode);
+                    //Log.Information($"VK code {vkCode:X2} mapped to char: '{keyChar}'");
+                    
                     if (keyChar != '\0' && _altKeyMapping.ContainsKey(keyChar))
                     {
                         int mappedValue = _altKeyMapping[keyChar];
+                        //Log.Information($"*** ALTERNATIVE KEY {keyChar} DETECTED *** - Mapped to {mappedValue}");
 
                         Avalonia.Threading.Dispatcher.UIThread.Post(() =>
                         {
+                            //Log.Information($"UI Thread: Processing alternative key {keyChar} -> {mappedValue}");
+                            
                             if (mappedValue <= 9) // Numbers 0-9
                             {
-                                PressKey(mappedValue);
+                                //Log.Information($"Processing as number: {mappedValue}");
+                                PressKeyGlobal(mappedValue);
                             }
                             else if (mappedValue == 10) // Cancel
                             {
-                                CommandInput(q9command.cancel);
+                                //Log.Information("Processing as cancel");
+                                CommandInputGlobal(q9command.cancel);
                             }
                             else if (mappedValue == 11) // Relate
                             {
-                                CommandInput(q9command.relate);
+                                //Log.Information("Processing as relate");
+                                CommandInputGlobal(q9command.relate);
                             }
                             else if (mappedValue == 12) // Prev/Shortcut
                             {
+                                //Log.Information("Processing as prev/shortcut");
                                 if (_selectMode)
-                                    CommandInput(q9command.prev);
+                                    CommandInputGlobal(q9command.prev);
                                 else
-                                    CommandInput(q9command.shortcut);
+                                    CommandInputGlobal(q9command.shortcut);
                             }
                             else if (mappedValue == 13) // Homo
                             {
-                                CommandInput(q9command.homo);
+                                //Log.Information("Processing as homo");
+                                CommandInputGlobal(q9command.homo);
                             }
                             else if (mappedValue == 14) // OpenClose
                             {
-                                CommandInput(q9command.openclose);
+                                //Log.Information("Processing as openclose");
+                                CommandInputGlobal(q9command.openclose);
                             }
+                            
+                            //Log.Information($"Alternative key processing completed");
                         });
                         shouldBlock = true;
+                        //Log.Information($"*** BLOCKING ALTERNATIVE KEY {keyChar} ***");
+                    }
+                    else
+                    {
+                        //Log.Information($"Alternative key {keyChar} not found in mapping - allowing passthrough");
                     }
                 }
 
-                // Always handle F10 for visibility toggle
-                if (vkCode == 0x79) // F10
+                //Log.Information($"Final decision - shouldBlock: {shouldBlock}");
+                
+                if (shouldBlock)
                 {
-                    Avalonia.Threading.Dispatcher.UIThread.Post(() => ToggleVisibility());
-                    shouldBlock = true;
+                    //Log.Information($"*** FINAL: BLOCKING KEY VK:{vkCode:X2} FOR CHINESE INPUT ***");
                 }
-
+                else
+                {
+                    //Log.Information($"*** FINAL: ALLOWING KEY VK:{vkCode:X2} TO PASS THROUGH ***");
+                }
+                
                 return shouldBlock; // Block key if we processed it
             }
             catch (Exception ex)
             {
-                Log.Error(ex, "Error in global key handler");
+                Log.Error(ex, "ERROR in global key handler");
                 return false;
             }
+        }
+        private void PressKeyGlobal(int inputInt)
+        {
+            //Log.Information($"=== PressKeyGlobal({inputInt}) START ===");
+            //Log.Information($"Window - IsActive:{this.IsActive} IsVisible:{this.IsVisible} Topmost:{this.Topmost}");
+            //Log.Information($"Current state - _currCode:'{_currCode}' _selectMode:{_selectMode} _isHidden:{_isHidden}");
+
+            // Ensure window is visible for user to see candidates
+            if (_isHidden)
+            {
+                //Log.Information("Window is hidden - showing it");
+                ToggleVisibility(); // Show the window so user can see what's happening
+            }
+
+            // Bring window to foreground but don't steal focus
+            if (!this.Topmost)
+            {
+                //Log.Information("Setting window to topmost");
+                this.Topmost = true;
+            }
+            
+            string inputStr = inputInt.ToString();
+            //Log.Information($"Processing input string: '{inputStr}'");
+            
+            if (_selectMode)
+            {
+                //Log.Information("In select mode");
+                if (inputInt == 0)
+                {
+                    //Log.Information("Input 0 in select mode - calling next");
+                    CommandInputGlobal(q9command.next);
+                }
+                else
+                {
+                    //Log.Information($"Input {inputInt} in select mode - selecting word");
+                    SelectWordGlobal(inputInt);
+                }
+            }
+            else
+            {
+                //Log.Information("In input mode");
+                _currCode += inputStr;
+                //Log.Information($"Updated _currCode to: '{_currCode}'");
+                
+                SetStatusPrefix(_currCode);
+                UpdateStatus();
+                
+                if (inputInt == 0)
+                {
+                    //Log.Information("Input 0 - processing result");
+                    var candidates = KeyInput(Convert.ToInt32(_currCode));
+                    //Log.Information($"Got {candidates?.Length ?? 0} candidates for code {_currCode}");
+                    ProcessResultGlobal(candidates);
+                }
+                else
+                {
+                    if (_currCode.Length == 3)
+                    {
+                        //Log.Information("Code length is 3 - processing result");
+                        var candidates = KeyInput(Convert.ToInt32(_currCode));
+                        //Log.Information($"Got {candidates?.Length ?? 0} candidates for code {_currCode}");
+                        ProcessResultGlobal(candidates);
+                    }
+                    else if (_currCode.Length == 1)
+                    {
+                        //Log.Information("Code length is 1 - setting button image");
+                        SetButtonImg(inputInt);
+                    }
+                    else
+                    {
+                        //Log.Information("Code length is other - setting default button image");
+                        SetButtonImg(10);
+                    }
+                }
+            }
+            
+            //Log.Information($"=== PressKeyGlobal({inputInt}) END ===");
+        }
+        private void CommandInputGlobal(q9command command)
+        {
+            // Ensure window is visible for user interaction
+            if (_isHidden)
+            {
+                ToggleVisibility();
+            }
+
+            this.Topmost = true;
+
+            if (command == q9command.cancel)
+            {
+                Cancel(true);
+            }
+            else if (command == q9command.openclose)
+            {
+                _homo = false;
+                _openclose = true;
+                string opencloseStr = string.Join("", KeyInput(1));
+                string[] opencloseArr = new string[(int)(opencloseStr.Length / 2.0)];
+                for (int i = 0; i < opencloseStr.Length; i += 2)
+                {
+                    opencloseArr[i / 2] = opencloseStr.Substring(i, 2);
+                }
+                SetStatusPrefix("「」");
+                StartSelectWord(opencloseArr);
+            }
+            else if (command == q9command.homo)
+            {
+                if (!_selectMode && !string.IsNullOrEmpty(_currCode))
+                {
+                    var candidates = KeyInput(Convert.ToInt32(_currCode));
+                    if (candidates != null && candidates.Length > 0)
+                    {
+                        _homo = true;
+                        SetStatusPrefix($"同音[{_currCode}]");
+                        StartSelectWord(candidates);
+                        return;
+                    }
+                }
+                else if (_selectMode)
+                {
+                    _homo = !_homo;
+                }
+                else
+                {
+                    _homo = !_homo;
+                }
+                RenewStatus();
+            }
+            else if (command == q9command.shortcut && !_selectMode)
+            {
+                if (_currCode.Length == 0)
+                {
+                    SetStatusPrefix("速選");
+                    StartSelectWord(KeyInput(1000));
+                }
+                else if (_currCode.Length == 1)
+                {
+                    SetStatusPrefix($"速選{Convert.ToInt32(_currCode)}");
+                    StartSelectWord(KeyInput(1000 + Convert.ToInt32(_currCode)));
+                }
+            }
+            else if (command == q9command.relate)
+            {
+                if (!_selectMode && _lastWord.Length == 1)
+                {
+                    _homo = false;
+                    SetStatusPrefix($"[{_lastWord}]關聯");
+                    StartSelectWord(GetRelate(_lastWord));
+                }
+                else if (_selectMode)
+                {
+                    //Log.Information("Relate command ignored in select mode");
+                    return;
+                }
+                else if (string.IsNullOrEmpty(_lastWord))
+                {
+                    _statusBlock.Text = "請先輸入一個字";
+                    return;
+                }
+            }
+            else if (command == q9command.prev && _selectMode)
+            {
+                AddPage(-1);
+            }
+            else if (command == q9command.next && _selectMode)
+            {
+                AddPage(1);
+            }
+        }
+
+        // NEW: Global version of ProcessResult
+        private void ProcessResultGlobal(string[] words)
+        {
+            if (words == null || words.Length == 0)
+            {
+                Cancel();
+                return;
+            }
+            StartSelectWord(words);
+        }
+
+        // NEW: Global version of SelectWord that sends to focused application
+        private void SelectWordGlobal(int inputInt)
+        {
+            int key = _currentPage * 9 + inputInt - 1;
+            if (key >= _currentCandidates.Count) return;
+            
+            string typeWord = _currentCandidates[key];
+            
+            if (_homo)
+            {
+                _homo = false;
+                string[] homoWords = GetHomo(typeWord);
+                if (homoWords.Length > 0)
+                {
+                    SetStatusPrefix($"同音[{typeWord}]");
+                    StartSelectWord(homoWords);
+                    return;
+                }
+            }
+            else if (_openclose)
+            {
+                _openclose = false;
+                SendOpenCloseGlobal(typeWord);
+                Cancel();
+                return;
+            }
+            
+            // Send the selected word to the currently focused application
+            SendTextGlobal(typeWord);
+            
+            // Set _lastWord for single characters to enable relate function
+            if (typeWord.Length == 1)
+            {
+                _lastWord = typeWord;
+                //Log.Information($"Set _lastWord to: '{_lastWord}' - relate function now available");
+                
+                // Get related words for display
+                string[] relates = GetRelate(typeWord);
+                if (relates != null && relates.Length > 0)
+                {
+                    SetZeroWords(relates);
+                    Cancel(false);
+                    return;
+                }
+            }
+            else
+            {
+                _lastWord = "";
+                //Log.Information("Cleared _lastWord - relate function disabled");
+            }
+            
+            Cancel();
         }
 
         private char VkCodeToChar(int vkCode)
@@ -579,6 +935,125 @@ namespace Q9CS_CrossPlatform
                 Log.Error(ex, "Error in global hotkey monitoring");
             }
         }
+        private void SendOpenCloseGlobal(string text)
+        {
+            try
+            {
+                string output = _scOutput ? Tcsc(text) : text;
+                
+                if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+                {
+                    _inputSimulator.Keyboard.TextEntry(output);
+                    _inputSimulator.Keyboard.KeyPress(VirtualKeyCode.LEFT); // Move cursor between the pair
+                    //Log.Information($"Sent Chinese openclose globally: '{output}'");
+                }
+                else if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
+                {
+                    // 使用 xdotool 輸出中文字元，移除單引號
+                    System.Diagnostics.Process.Start("xdotool", $"type {output}").WaitForExit();
+                    // 使用 xdotool 模擬左箭頭鍵以將游標移回中間
+                    //System.Diagnostics.Process.Start("xdotool", "key Left").WaitForExit(); 
+                    //Log.Information($"Sent Chinese openclose globally via xdotool: '{output}'");
+                }
+                
+                _statusBlock.Text = $"已輸出配對符號: {output}";
+            }
+            catch (Exception ex)
+            {
+                _statusBlock.Text = $"配對符號輸出失敗：{ex.Message}";
+                Log.Error(ex, $"Failed to send Chinese openclose globally: {text}");
+            }
+        }
+        private void SendTextGlobal(string text)
+        {
+            //Log.Information($"=== SendTextGlobal('{text}') START ===");
+            
+            try
+            {
+                string output = _scOutput ? Tcsc(text) : text;
+                //Log.Information($"Output text after conversion: '{output}'");
+                //Log.Information($"Runtime platform: {RuntimeInformation.OSDescription}");
+                //Log.Information($"InputSimulator null check: {_inputSimulator == null}");
+                
+                if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+                {
+                    //Log.Information("Using Windows InputSimulator");
+                    
+                    if (_inputSimulator == null)
+                    {
+                        Log.Error("InputSimulator is null!");
+                        _statusBlock.Text = "InputSimulator未初始化";
+                        return;
+                    }
+                    
+                    //Log.Information($"About to send text: '{output}'");
+                    _inputSimulator.Keyboard.TextEntry(output);
+                    //Log.Information($"*** SUCCESS: Sent Chinese text to focused application: '{output}' ***");
+                }
+                else if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
+                {
+                    //Log.Information("Using Linux xclip");
+                    //var process = System.Diagnostics.Process.Start("xdotool", $"type {output}");
+                    //process.WaitForExit();
+                    string copyCmd = $"echo -n \"{output}\" | xclip -selection clipboard";
+                    //string pasteCmd = "xdotool key --clearmodifiers ctrl+v";
+                    string pasteCmd = "xdotool keydown ctrl key v keyup ctrl";
+                    var process = System.Diagnostics.Process.Start("bash", $"-c \"{copyCmd} && {pasteCmd}\"");
+                    process.WaitForExit();                   
+                    //Log.Information($"*** SUCCESS: Sent Chinese text via xclip: '{output}' (exit code: {process.ExitCode}) ***");
+                }
+                
+                // Update status to show last sent character
+                _statusBlock.Text = $"已輸出: {output}";
+                //Log.Information($"Updated status block: {_statusBlock.Text}");
+            }
+            catch (Exception ex)
+            {
+                _statusBlock.Text = $"全域輸出失敗：{ex.Message}";
+                Log.Error(ex, $"*** ERROR: Failed to send Chinese text globally: '{text}' ***");
+                Log.Error($"Exception details: {ex}");
+            }
+            
+            //Log.Information($"=== SendTextGlobal('{text}') END ===");
+        }
+
+        private void ForceTopmostLinux()
+        {
+            if (!RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
+                return;
+                
+            try
+            {
+                // Use wmctrl command to force window to stay on top
+                var process = Process.Start(new ProcessStartInfo
+                {
+                    FileName = "wmctrl",
+                    Arguments = $"-r \"九万\" -b add,above",
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    CreateNoWindow = true
+                });
+                
+                process?.WaitForExit();
+                //Log.Information("Used wmctrl to force window topmost");
+            }
+            catch (Exception ex)
+            {
+                Log.Warning(ex, "wmctrl not available, using fallback method");
+                
+                // Fallback: Multiple topmost toggles
+                Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+                {
+                    for (int i = 0; i < 3; i++)
+                    {
+                        this.Topmost = false;
+                        this.Topmost = true;
+                        this.Activate();
+                    }
+                });
+            }
+        }
 
         private void ToggleVisibility()
         {
@@ -587,15 +1062,41 @@ namespace Q9CS_CrossPlatform
             if (_isHidden)
             {
                 this.Hide();
-                // Start monitoring for F10 when hidden
                 StartGlobalHotkeyMonitoring();
             }
             else
             {
-                // Stop global monitoring when visible
                 StopGlobalHotkeyMonitoring();
                 this.Show();
-                this.Topmost = true;
+                
+                if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
+                {
+                    // Linux fix: Quick maximize-restore cycle to trigger topmost refresh
+                    Avalonia.Threading.Dispatcher.UIThread.Post(async () =>
+                    {
+                        // Store current state
+                        var currentState = this.WindowState;
+                        
+                        // Quick maximize (this triggers the window manager to refresh topmost)
+                        this.WindowState = WindowState.Maximized;
+                        
+                        // Very brief delay - just enough for window manager to process
+                        await Task.Delay(10);
+                        
+                        // Immediately restore to normal (your OnPropertyChanged will handle the restore)
+                        this.WindowState = WindowState.Normal;
+                        
+                        // The OnPropertyChanged method already calls LoadWindowSize() and sets Topmost
+                        // So the topmost should now work properly
+                        
+                        //Log.Information("Linux topmost restored using maximize-restore cycle");
+                        
+                    }, Avalonia.Threading.DispatcherPriority.Background);
+                }
+                else
+                {
+                    this.Topmost = true;
+                }
             }
         }
 
@@ -612,82 +1113,255 @@ namespace Q9CS_CrossPlatform
         }
 
         private void UpdateStatusDisplay()
-        {
-            string inputMode = _useNumpad ? "數字鍵盤" : "字母鍵盤";
-            string outputMode = _scOutput ? "簡體" : "繁體";
-            _statusBlock.Text = $"輸入:{inputMode} 輸出:{outputMode} F10:隱藏";
-        }
+    {
+        string inputMode = _useNumpad ? "數字鍵盤" : "字母鍵盤";
+        string outputMode = _scOutput ? "簡體" : "繁體";
+        string globalStatus = _globalInputEnabled ? "全域" : "聚焦";
+        
+        _statusBlock.Text = $"輸入:{inputMode}({globalStatus}) 輸出:{outputMode} F10:隱藏";
+    }
 
         public MainWindow()
         {
             Log.Logger = new LoggerConfiguration()
                 .WriteTo.Console()
                 .WriteTo.File("logs/app.log")
+                .MinimumLevel.Debug()  // ENABLE DEBUG LOGGING
                 .CreateLogger();
+
+            //Log.Information("=== MainWindow Constructor START ===");
 
             try
             {
                 string dbPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "files/dataset.db");
+                //Log.Information($"Database path: {dbPath}");
+                
                 if (!File.Exists(dbPath))
                 {
                     throw new FileNotFoundException("Database not found", dbPath);
                 }
+                
                 _codeTable = new CodeTable(dbPath);
+                //Log.Information("CodeTable initialized");
+                
                 _inputSimulator = new InputSimulator();
+                //Log.Information("InputSimulator initialized");
 
                 DetectPreferredFont();
                 PreloadImages();
                 InitializeComponent();
 
-                // Initialize global keyboard hook
+                // IMPORTANT: Initialize global keyboard hook BEFORE other setup
                 InitializeGlobalKeyboardHook();
 
-                // Set fixed window size and disable maximize
+                // Set window properties
                 this.Width = 280;
                 this.Height = 350;
                 this.CanResize = true;
                 this.WindowState = WindowState.Normal;
-                LoadWindowSize();
                 this.Topmost = true;
+                this.ShowInTaskbar = true;
+                this.WindowStartupLocation = WindowStartupLocation.Manual;
+                
+                LoadWindowSize();
 
                 this.SizeChanged += OnSizeChanged;
                 this.PropertyChanged += OnPropertyChanged;
                 this.Closing += OnClosing;
 
+                this.Activated += (s, e) => {
+                    //Log.Information("*** Chinese input window ACTIVATED ***");
+                };
                 
+                this.Deactivated += (s, e) => {
+                    //Log.Information("*** Chinese input window DEACTIVATED - global input should still work ***");
+                    this.Topmost = true;
+                    //Log.Information($"Topmost {this.Topmost}");
+                };
 
-                // Show initial help message
+                // Show initial status
                 UpdateStatusDisplay();
-
+                
+                //Log.Information("=== Chinese input initialized - ready for global operation ===");
+                //Log.Information($"Global input enabled: {_globalInputEnabled}");
+                //Log.Information($"Numpad mode: {_useNumpad}");
+                
             }
             catch (Exception ex)
             {
-                Log.Error(ex, "Failed to initialize MainWindow.");
+                Log.Error(ex, "*** CRITICAL ERROR: Failed to initialize MainWindow ***");
                 _statusBlock = new TextBlock { Text = $"初始化失敗: {ex.Message}" };
                 Content = _statusBlock;
             }
+            
+            //Log.Information("=== MainWindow Constructor END ===");
         }
 
         private void InitializeGlobalKeyboardHook()
         {
+            //Log.Information("=== InitializeGlobalKeyboardHook START ===");
             try
             {
                 if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
                 {
+                    //Log.Information("Creating Windows GlobalKeyboardHook");
                     _globalHook = new GlobalKeyboardHook();
                     _globalHook.KeyDown += OnGlobalKeyDown;
+                    //Log.Information("Installing Windows global keyboard hook");
                     _globalHook.Install();
+                    //Log.Information("*** Windows global keyboard hook installed successfully ***");
+                }
+                else if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
+                {
+                    //Log.Information("Platform is Linux, attempting to start Python keyboard hook.");
+                    StartLinuxKeyboardHook(); // Call our new method
                 }
                 else
                 {
                     Log.Warning("Global keyboard hook not available on this platform.");
+                    _globalInputEnabled = false;
                 }
             }
             catch (Exception ex)
             {
-                Log.Error(ex, "Failed to install global keyboard hook.");
+                Log.Error(ex, "*** CRITICAL ERROR: Failed to install global keyboard hook ***");
                 _globalInputEnabled = false;
+                _statusBlock.Text = "全域監聽失敗";
             }
+            //Log.Information("=== InitializeGlobalKeyboardHook END ===");
+        }
+        private void ToggleGlobalInput()
+        {
+            _globalInputEnabled = !_globalInputEnabled;
+            
+            string status = _globalInputEnabled ? "已啟用" : "已停用";
+            //Log.Information($"Global input {status}");
+            
+            Avalonia.Threading.Dispatcher.UIThread.Post(() => {
+                UpdateStatusDisplay();
+            });
+        }
+        private void StartLinuxKeyboardHook()
+        {
+            // IMPORTANT: This path needs to point to your actual keyboard device.
+            // Run `ls -l /dev/input/by-id/` in a terminal. Look for the one ending in "-kbd".
+            // Example: /dev/input/event4
+            string keyboardDevicePath = "/dev/input/event2"; // <--- CHANGE THIS IF NEEDED
+
+            string scriptPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "scripts/linux_uinput_keyboard_hook.py");
+
+            if (!File.Exists(scriptPath))
+            {
+                Log.Error($"Linux hook script not found at: {scriptPath}");
+                _statusBlock.Text = "錯誤: 找不到Python腳本";
+                return;
+            }
+
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = "sudo", // We need root to read /dev/input
+                Arguments = $"python3 {scriptPath} {keyboardDevicePath}",
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true
+            };
+
+            _linuxHookProcess = new Process { StartInfo = startInfo };
+
+            // This event is fired every time the python script prints a line
+            _linuxHookProcess.OutputDataReceived += OnLinuxHookOutput;
+            //_linuxHookprocess.ErrorDataReceived += (sender, e) => {
+            //    if (!string.IsNullOrEmpty(e.Data)) Log.Error($"LinuxHookScript: {e.Data}");
+            //};
+
+            try
+            {
+                _linuxHookProcess.Start();
+                _linuxHookProcess.BeginOutputReadLine();
+                _linuxHookProcess.BeginErrorReadLine();
+                //Log.Information($"Successfully started Linux hook process with PID: {_linuxHookProcess.Id}");
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, "Failed to start linux_keyboard_hook.py");
+                _statusBlock.Text = "錯誤: 啟動Python腳本失敗";
+            }
+        }
+
+        private void OnLinuxHookOutput(object sender, DataReceivedEventArgs e)
+        {
+            if (string.IsNullOrWhiteSpace(e.Data))
+                return;
+
+            //Log.Information($"Received from hook: {e.Data}");
+
+            // The data comes in the format "KEY:KP_1"
+            string command = e.Data.Split(':').LastOrDefault();
+            //Log.Information(command);
+
+            // All UI and state updates must be dispatched to the UI thread
+            Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+            {
+                switch (command)
+                {
+                    /* evdev version
+                    case "KEY_F10":
+                        ToggleVisibility();
+                        break;
+
+                    // Number Keys
+                    case "KEY_KP0": PressKeyGlobal(0); break;
+                    case "KEY_KP1": PressKeyGlobal(1); break;
+                    case "KEY_KP2": PressKeyGlobal(2); break;
+                    case "KEY_KP3": PressKeyGlobal(3); break;
+                    case "KEY_KP4": PressKeyGlobal(4); break;
+                    case "KEY_KP5": PressKeyGlobal(5); break;
+                    case "KEY_KP6": PressKeyGlobal(6); break;
+                    case "KEY_KP7": PressKeyGlobal(7); break;
+                    case "KEY_KP8": PressKeyGlobal(8); break;
+                    case "KEY_KP9": PressKeyGlobal(9); break;
+
+                    // Command Keys
+                    case "KEY_KPDOT": CommandInputGlobal(q9command.cancel); break;
+                    case "KEY_KPPLUS":     CommandInputGlobal(q9command.relate); break;
+                    case "KEY_KPASTERISK":CommandInputGlobal(q9command.homo); break;
+                    case "KEY_KPSLASH":  CommandInputGlobal(q9command.openclose); break;
+                    case "KEY_KPMINUS":
+                        if (_selectMode) CommandInputGlobal(q9command.prev);
+                        else CommandInputGlobal(q9command.shortcut);
+                        break;
+                     */
+
+                     //uinput version
+
+                     case "68":
+                        ToggleVisibility();
+                        break;
+
+                    // Number Keys
+                    case "82": PressKeyGlobal(0); break;
+                    case "79": PressKeyGlobal(1); break;
+                    case "80": PressKeyGlobal(2); break;
+                    case "81": PressKeyGlobal(3); break;
+                    case "75": PressKeyGlobal(4); break;
+                    case "76": PressKeyGlobal(5); break;
+                    case "77": PressKeyGlobal(6); break;
+                    case "71": PressKeyGlobal(7); break;
+                    case "72": PressKeyGlobal(8); break;
+                    case "73": PressKeyGlobal(9); break;
+
+                    // Command Keys
+                    case "83": CommandInputGlobal(q9command.cancel); break;
+                    case "78":     CommandInputGlobal(q9command.relate); break;
+                    case "55":CommandInputGlobal(q9command.homo); break;
+                    case "98":  CommandInputGlobal(q9command.openclose); break;
+                    case "74":
+                        if (_selectMode) CommandInputGlobal(q9command.prev);
+                        else CommandInputGlobal(q9command.shortcut);
+                        break;
+                }
+            });
         }
 
         private void PreloadImages()
@@ -768,7 +1442,7 @@ namespace Q9CS_CrossPlatform
                 (screen.Height - (int)this.Height) / 2);
             try
             {
-                Log.Information("Loading XAML...");
+                //Log.Information("Loading XAML...");
                 AvaloniaXamlLoader.Load(this);
                 _inputBox = this.FindControl<TextBox>("InputBox");
                 _statusBlock = this.FindControl<TextBlock>("StatusBlock");
@@ -853,7 +1527,7 @@ namespace Q9CS_CrossPlatform
                     StopGlobalHotkeyMonitoring();
                 };
 
-                Log.Information("XAML loaded successfully.");
+                //Log.Information("XAML loaded successfully.");
                 Cancel(true); // Initialize UI
             }
             catch (Exception ex)
@@ -863,61 +1537,102 @@ namespace Q9CS_CrossPlatform
                 Content = _statusBlock;
             }
         }
+        private void AddContextMenu()
+        {
+            var contextMenu = new ContextMenu();
+            
+            var toggleGlobalItem = new MenuItem { Header = "切換全域輸入模式" };
+            toggleGlobalItem.Click += (s, e) => ToggleGlobalInputMode();
+            
+            var toggleNumpadItem = new MenuItem { Header = "切換數字鍵盤/字母模式" };
+            toggleNumpadItem.Click += (s, e) => ToggleNumpadMode();
+            
+            var toggleSCItem = new MenuItem { Header = "切換繁體/簡體輸出" };
+            toggleSCItem.Click += (s, e) => ToggleSCMode();
+            
+            var hideItem = new MenuItem { Header = "隱藏視窗 (F10)" };
+            hideItem.Click += (s, e) => ToggleVisibility();
+            
+            contextMenu.Items.Add(toggleGlobalItem);
+            contextMenu.Items.Add(toggleNumpadItem);
+            contextMenu.Items.Add(toggleSCItem);
+            contextMenu.Items.Add(new Separator());
+            contextMenu.Items.Add(hideItem);
+            
+            this.ContextMenu = contextMenu;
+        }
+        private void FinalizeGlobalSetup()
+        {
+            AddContextMenu();
+            
+            // Ensure global input is enabled by default
+            _globalInputEnabled = true;
+            
+            //Log.Information("Global Chinese input setup complete");
+            //Log.Information("Instructions:");
+            //Log.Information("- Use numpad 0-9 to input Chinese characters globally");
+            //Log.Information("- Use numpad operators (+, -, *, /, .) for special functions");
+            //Log.Information("- Press F10 to hide/show the window");
+            //Log.Information("- Right-click the window for options menu");
+            //Log.Information("- The input works in any focused application (Notepad, etc.)");
+        }
 
+    
         private void HandleKeyInput(Key key)
         {
-            if (_isHidden)
+            // If window is focused, handle keys normally
+            if (this.IsActive)
             {
                 if (key == Key.F10)
                 {
                     ToggleVisibility();
+                    return;
                 }
-                return;
-            }
 
-            // Handle F10 to hide
-            if (key == Key.F10)
-            {
-                ToggleVisibility();
-                return;
-            }
+                // Add Ctrl+G shortcut to toggle global input mode
+                //if (key == Key.G && this.KeyModifiers.HasFlag(KeyModifiers.Control))
+                //{
+                //    ToggleGlobalInputMode();
+                //    return;
+                //}
 
-            if (!_useNumpad)
-            {
-                // Handle alternative letter keys
-                HandleAlternativeInput(key);
-                return;
-            }
+                if (!_useNumpad)
+                {
+                    HandleAlternativeInput(key);
+                    return;
+                }
 
-            // ONLY handle numpad keys when in numpad mode - NOT regular number keys
-            if (key >= Key.NumPad0 && key <= Key.NumPad9) // ONLY numpad keys
-            {
-                int inputInt = (int)key - (int)Key.NumPad0;
-                PressKey(inputInt);
+                // Handle numpad keys when window is focused
+                if (key >= Key.NumPad0 && key <= Key.NumPad9)
+                {
+                    int inputInt = (int)key - (int)Key.NumPad0;
+                    PressKey(inputInt); // Use regular PressKey when window is focused
+                }
+                else if (key == Key.Decimal)
+                {
+                    CommandInput(q9command.cancel);
+                }
+                else if (key == Key.Add)
+                {
+                    CommandInput(q9command.relate);
+                }
+                else if (key == Key.Subtract)
+                {
+                    if (_selectMode)
+                        CommandInput(q9command.prev);
+                    else
+                        CommandInput(q9command.shortcut);
+                }
+                else if (key == Key.Multiply)
+                {
+                    CommandInput(q9command.homo);
+                }
+                else if (key == Key.Divide)
+                {
+                    CommandInput(q9command.openclose);
+                }
             }
-            else if (key == Key.Decimal) // ONLY numpad decimal
-            {
-                CommandInput(q9command.cancel);
-            }
-            else if (key == Key.Add) // Numpad +
-            {
-                CommandInput(q9command.relate);
-            }
-            else if (key == Key.Subtract) // Numpad -
-            {
-                if (_selectMode)
-                    CommandInput(q9command.prev);
-                else
-                    CommandInput(q9command.shortcut);
-            }
-            else if (key == Key.Multiply) // Numpad *
-            {
-                CommandInput(q9command.homo);
-            }
-            else if (key == Key.Divide) // Numpad /
-            {
-                CommandInput(q9command.openclose);
-            }
+            // If window is not focused, global input handler will take care of it
         }
 
         // ... (rest of the methods continue in next part due to length)
@@ -1033,7 +1748,7 @@ namespace Q9CS_CrossPlatform
                 else if (_selectMode)
                 {
                     // Ignore relate command in select mode - do nothing
-                    Log.Information("Relate command ignored in select mode");
+                    //Log.Information("Relate command ignored in select mode");
                     return;
                 }
                 else if (string.IsNullOrEmpty(_lastWord))
@@ -1148,7 +1863,7 @@ namespace Q9CS_CrossPlatform
             if (typeWord.Length == 1)
             {
                 _lastWord = typeWord;
-                Log.Information($"Set _lastWord to: '{_lastWord}' - relate function now available");
+                //Log.Information($"Set _lastWord to: '{_lastWord}' - relate function now available");
                 
                 // Get related words for display
                 string[] relates = GetRelate(typeWord);
@@ -1162,7 +1877,7 @@ namespace Q9CS_CrossPlatform
             else
             {
                 _lastWord = ""; // Clear last word for multi-character selections
-                Log.Information("Cleared _lastWord - relate function disabled");
+                //Log.Information("Cleared _lastWord - relate function disabled");
             }
             
             Cancel();
@@ -1415,7 +2130,7 @@ namespace Q9CS_CrossPlatform
                 }
                 else if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
                 {
-                    System.Diagnostics.Process.Start("ydotool", $"type {output}").WaitForExit();
+                    System.Diagnostics.Process.Start("xdotool", $"type {output}").WaitForExit();
                 }
             }
             catch (Exception ex)
@@ -1437,8 +2152,8 @@ namespace Q9CS_CrossPlatform
                 }
                 else if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
                 {
-                    System.Diagnostics.Process.Start("ydotool", $"type {output}").WaitForExit();
-                    System.Diagnostics.Process.Start("ydotool", "key 105:1 105:0").WaitForExit();
+                    System.Diagnostics.Process.Start("xdotool", $"type {output}").WaitForExit();
+                    System.Diagnostics.Process.Start("xdotool", "key Left").WaitForExit();
                 }
             }
             catch (Exception ex)
@@ -1493,7 +2208,7 @@ namespace Q9CS_CrossPlatform
     }
 
     // Global Keyboard Hook Implementation for Windows
-    public class GlobalKeyboardHook
+    public class GlobalKeyboardHook : IKeyboardHook
     {
         private const int WH_KEYBOARD_LL = 13;
         private const int WM_KEYDOWN = 0x0100;
@@ -1503,7 +2218,6 @@ namespace Q9CS_CrossPlatform
         private static GlobalKeyboardHook _instance;
 
         public delegate IntPtr LowLevelKeyboardProc(int nCode, IntPtr wParam, IntPtr lParam);
-        public delegate bool KeyboardHookHandler(int vkCode, bool isKeyUp);
         public event KeyboardHookHandler KeyDown;
 
         public GlobalKeyboardHook()
@@ -1523,6 +2237,11 @@ namespace Q9CS_CrossPlatform
                 UnhookWindowsHookEx(_hookID);
                 _hookID = IntPtr.Zero;
             }
+        }
+
+        public void Dispose()
+        {
+            Uninstall();
         }
 
         private static IntPtr SetHook(LowLevelKeyboardProc proc)
@@ -1663,7 +2382,7 @@ namespace Q9CS_CrossPlatform
             {
                 using var connection = new SqliteConnection(_connectionString);
                 connection.Open();
-                Log.Information("Database connection opened successfully");
+                //Log.Information("Database connection opened successfully");
 
                 // First, check if word_meta table exists
                 var tableCheckCommand = connection.CreateCommand();
@@ -1679,7 +2398,7 @@ namespace Q9CS_CrossPlatform
                     return words.ToArray();
                 }
                 
-                Log.Information("word_meta table found");
+                //Log.Information("word_meta table found");
 
                 // Check table structure
                 var schemaCommand = connection.CreateCommand();
@@ -1694,7 +2413,7 @@ namespace Q9CS_CrossPlatform
                         columns.Add(columnName);
                     }
                 }
-                Log.Information($"word_meta table columns: {string.Join(", ", columns)}");
+                //Log.Information($"word_meta table columns: {string.Join(", ", columns)}");
 
                 // Check if the input word exists in the table
                 var checkWordCommand = connection.CreateCommand();
